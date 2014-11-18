@@ -122,13 +122,11 @@ function computeutx{T}(Qs,h::T,ht::T,xt::T,utl,utr,ux,ul,ur)
 
     H  = [h^j for j = 0:nd-1]
     Ht = [j*ht*h^(j-1) for j = 0:nd-1]
-    @show Ht
 
     utx = zero(ux)
 
     for i=1:nu
         utx[:,i] = (Qleft*(H.*utl[:,i]+Ht.*ul[:,i]) + Qright*(H.*utr[:,i]+Ht.*ur[:,i]))
-        @show utx
         xt = (xt+s*ht)
         for j = 1:size(utx,1)-1
             # upscale spatial derivatives
