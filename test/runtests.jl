@@ -1,13 +1,15 @@
+module MovcolNTests
+
 using MovcolN
 using FactCheck
-
-import MovcolN
 
 # write your own tests here
 
 facts("Generating Q") do
     kmax  = 4; nder = 3;
-    Ql,Qr = MovcolN.generateQatx(nder,1//2,kmax=kmax)
+    Ql,Qr,x = MovcolN.generateQatx(nder,1//2,kmax=kmax)
+
+    @fact x => 1//2
 
     @fact size(Ql) => (kmax,nder)
 
@@ -19,8 +21,8 @@ facts("Generating Q") do
 end
 
 facts("Computing derivatives") do
-    kmax  = 4; nder = 3;
-    Ql,Qr = MovcolN.generateQatx(nder,0.5,kmax=kmax)
+    kmax    = 4; nder = 3;
+    Ql,Qr,_ = MovcolN.generateQatx(nder,0.5,kmax=kmax)
 
     ul = hcat(Float64[ 0, 0, 2   ])
     ur = hcat(Float64[ 4, 4, 2   ])
@@ -34,4 +36,30 @@ facts("Computing derivatives") do
 
     @fact uc1  => uc
     @fact utc1[1:3] => utc
+end
+
+facts("Generating AB matrix") do
+    relerr = Array(Float64,0)
+    abserr = Array(Float64,0)
+
+    # for Float64 this method converges for up to 8 collocatin points
+    nconv = 8
+    for n = 2:nconv
+        AB  =MovcolN.generateAB(n)
+        sl,_=MovcolN.lobatto(n+1)
+        sg,_=MovcolN.gauss(n)
+
+        @fact size(AB) => (n,n+1)
+
+        push!(abserr,norm((AB*sin(sl)-cos(sg)),         Inf))
+        push!(relerr,norm((AB*sin(sl)-cos(sg))./sin(sg),Inf))
+    end
+
+    relconv = exp(diff(log(relerr)))
+    absconv = exp(diff(log(abserr)))
+
+    @fact relconv.<0.2 => all  # relative error is at most ~O(0.2^n)
+    @fact absconv.<0.1 => all  # absolute error is at most ~O(0.1^n)
+end
+
 end
