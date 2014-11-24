@@ -30,9 +30,15 @@ facts("Computing derivatives") do
     utr= hcat(Float64[12, 8, 2   ])
     uc = hcat(Float64[ 1, 2, 2, 0])
     utc=      Float64[ 1, 2, 2   ]
+    h  = 2.; ht = 2.
+    H  = [h^j for j = 0:kmax]
+    Ht = [j*ht*h^(j-1) for j = 0:kmax]
 
-    uc1  = MovcolN.computeux((Ql,Qr,0.5),2.,ul,ur)
-    utc1 = MovcolN.computeutx((Ql,Qr,0.5),2.,2.,0.,utl,utr,uc,ul,ur)
+    uc1 = Array(Float64,kmax,1)
+    utc1 = Array(Float64,kmax,1)
+
+    MovcolN.computeux!(uc1,(Ql,Qr,0.5),H,ul,ur)
+    MovcolN.computeutx!(utc1,(Ql,Qr,0.5),H,Ht,0.,utl,utr,uc,ul,ur)
 
     @fact uc1  => uc
     @fact utc1[1:3] => utc

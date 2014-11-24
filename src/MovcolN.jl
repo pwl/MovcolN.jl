@@ -1,6 +1,7 @@
 module MovcolN
 
 using Polynomials
+using Devectorize
 
 export getcomputeres
 
@@ -41,55 +42,61 @@ function generateQatx{T}(n,x::T;kmax=n)
 end
 
 
-function computeux{T}(Qs,h::T,ul::Matrix{T},ur::Matrix{T})
+function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::Matrix{T},ur::Matrix{T})
     Qleft, Qright, _ = Qs
     nd, nu = size(ul)
+    nq = size(Qleft,1)
 
-    H  = [h^j for j = 0:nd-1]
-    ux = Array(T,size(Qleft,1),nu)
+    Hul = Array(T,nd)
+    Hur = Array(T,nd)
 
     for i=1:nu
-        ux[:,i] = (Qleft*(H.*ul[:,i]) + Qright*(H.*ur[:,i]))
-        for j = 1:size(ux,1)
-            # upscale spatial derivatives
-            ux[j,i] /= h^(j-1)
-        end
+        @devec Hul[:] = H[1:nd].*ul[:,i]
+        @devec Hur[:] = H[1:nd].*ur[:,i]
+        ux[:,i] = Qleft*Hul + Qright*Hur
+        @devec ux[:,i] = ux[:,i]./H[1:nq]
     end
-
-    return ux
 end
 
 
-function computeutx(Qs,h,ht,xt,utl,utr,ux,ul,ur)
+function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     Qleft, Qright, s = Qs
     nd, nu = size(utl)
+    h  = H[2]
+    ht = Ht[2]
 
-    H  = [h^j for j = 0:nd-1]
-    Ht = [j*ht*h^(j-1) for j = 0:nd-1]
+    Hul = Array(T,nd)
+    Hur = Array(T,nd)
 
-    utx = zero(ux)
-
-    for i=1:nu
-        utx[:,i] = (Qleft*(H.*utl[:,i]+Ht.*ul[:,i]) + Qright*(H.*utr[:,i]+Ht.*ur[:,i]))
+    for i = 1:nu
+        @devec Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
+        @devec Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
+        utx[:,i] = Qleft*Hul+Qright*Hur
         xt = (xt+s*ht)
+        # upscale spatial derivatives
+        @devec utx[:,i] = utx[:,i]./H
         for j = 1:size(utx,1)-1
-            # upscale spatial derivatives
-            utx[j,i] /= h^(j-1)
             # correct for the dilation and shift of the mesh
             utx[j,i] += -((j-1)*ht/h*ux[j,i]+xt*ux[j+1,i]) # j*ht*h^(j-1) = d/dt(h^j)
         end
     end
-
-    return utx
 end
 
-function getcollocationvalues!(FVal,Qs,F,t,h,ht,x,xt,ul,ur,utl,utr)
+function getcollocationvalues!(FVal,Qs,F,t,H,Ht,x,xt,ul,ur,utl,utr)
+    h = H[2]                    # H[2] = h^1 = h
+    T   = eltype(t)
+    nq  = size(Qs[1][1],1)      # @todo get rid of nq and nu
+                                # altogether
+    nu  = size(ul,2)
+    ux  = Array(T,nq,nu)
+    utx = zero(ux)
+
     for j = 1:length(Qs)
         _,_,s  = Qs[j]
-        ux  =  computeux(Qs[j],h,ul,ur)
-        uxt = computeutx(Qs[j],h,ht,xt,utl,utr,ux,ul,ur)
+         computeux!( ux,Qs[j],H,ul,ur)
+        computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
         xs  = x+s*h
-        FVal[:,j] = F(t,xs,ux,uxt)
+        FVal[:,j] = F(t,xs,ux,utx)
     end
 end
 
@@ -132,6 +139,8 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
     res      = Array(T,ns*nu*nx+nx)
     Mhalf    = Array(T,        nx-1)
     Yhalf    = Array(T,        nx+1)
+    uhalf    = Array(T,ns+1,nu)
+    uthalf   = Array(T,ns+1,nu)
 
     AB = generateAB(ns)
 
@@ -148,12 +157,14 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
              ul =  u[:,:,i];  ur =  u[:,:,i+1]
             utl = ut[:,:,i]; utr = ut[:,:,i+1]
             h  =  xr-xl; ht = xtr-xtl
+            H  = [h^j for j=0:ns]
+            Ht = [j*ht*h^(j-1) for j=0:ns]
 
             #######################################################################
             # pde residua
             #######################################################################
-            getcollocationvalues!(FatGauss,QsGauss,F,t,h,ht,xl,xtl,ul,ur,utl,utr)
-            getcollocationvalues!(GatLobat,QsLobat,G,t,h,ht,xl,xtl,ul,ur,utl,utr)
+            getcollocationvalues!(FatGauss,QsGauss,F,t,H,Ht,xl,xtl,ul,ur,utl,utr)
+            getcollocationvalues!(GatLobat,QsLobat,G,t,H,Ht,xl,xtl,ul,ur,utl,utr)
 
             # @todo change the definition of AB or FatGauss to remove
             # the primes
@@ -177,8 +188,8 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
             else
                 xhalf  =  xl+ h/2
                 xthalf = xtl+ht/2
-                uhalf  =  computeux(QsLobat[ns2+1],h,ul,ur)
-                uthalf = computeutx(QsLobat[ns2+1],h,ht,xthalf,utl,utr,uhalf,ul,ur)
+                 computeux!(uhalf, QsLobat[ns2+1],H,ul,ur)
+                computeutx!(uthalf,QsLobat[ns2+1],H,Ht,xthalf,utl,utr,uhalf,ul,ur)
                 Mhalf[i] = M(t,xhalf,uhalf,uthalf)
             end
 
