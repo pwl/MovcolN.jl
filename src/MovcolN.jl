@@ -83,6 +83,16 @@ function computeutx(Qs,h,ht,xt,utl,utr,ux,ul,ur)
     return utx
 end
 
+function getcollocationvalues!(FVal,Qs,F,t,h,ht,x,xt,ul,ur,utl,utr)
+    for j = 1:length(Qs)
+        _,_,s  = Qs[j]
+        ux  =  computeux(Qs[j],h,ul,ur)
+        uxt = computeutx(Qs[j],h,ht,xt,utl,utr,ux,ul,ur)
+        xs  = x+s*h
+        FVal[:,j] = F(t,xs,ux,uxt)
+    end
+end
+
 
 # memory alignment
 #
@@ -119,6 +129,7 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
 
     resu     = Array(T,nu,ns,  nx)
     resx     = Array(T,        nx)
+    res      = Array(T,ns*nu*nx+nx)
     Mhalf    = Array(T,        nx-1)
     Yhalf    = Array(T,        nx+1)
 
@@ -128,68 +139,56 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
                            x :: Vector{T}, xt :: Vector{T},
                            u :: Array{T,3},ut :: Array{T,3})
 
-        #######################################################################
-        # pde residua
-        #######################################################################
+        # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
+
         for i = 1:nx-1
-            h  =  x[i+1]- x[i]
-            ht = xt[i+1]-xt[i]
-            ul = u[:,:,i  ]
-            ur = u[:,:,i+1]
-            utl= ut[:,:,i  ]
-            utr= ut[:,:,i+1]
+            # @todo create an immutable with h,ht,ul,ur,utl,utr?
+             xl =  x[i];      xr =  x[i+1]
+            xtl = xt[i];     xtr = xt[i+1]
+             ul =  u[:,:,i];  ur =  u[:,:,i+1]
+            utl = ut[:,:,i]; utr = ut[:,:,i+1]
+            h  =  xr-xl; ht = xtr-xtl
 
-            for j = 1:ns
-                ux  =  computeux(QsGauss[j],h,ul,ur)
-                uxt = computeutx(QsGauss[j],h,ht,xt[i],utl,utr,ux,ul,ur)
-                xj  = x[i]+sGauss[j]*h
-                FatGauss[:,j] = F(t,xj,ux,uxt)
-            end
+            #######################################################################
+            # pde residua
+            #######################################################################
+            getcollocationvalues!(FatGauss,QsGauss,F,t,h,ht,xl,xtl,ul,ur,utl,utr)
+            getcollocationvalues!(GatLobat,QsLobat,G,t,h,ht,xl,xtl,ul,ur,utl,utr)
 
-            for j = 1:ns+1
-                ux  =  computeux(QsLobat[j],h,ul,ur)
-                uxt = computeutx(QsLobat[j],h,ht,xt[i],utl,utr,ux,ul,ur)
-                xj  = x[i]+sLobat[j]*h
-                GatLobat[:,j] = G(t,xj,ux,uxt)
-            end
-
+            # @todo change the definition of AB or FatGauss to remove
+            # the primes
             resu[:,:,i] = FatGauss'-AB*GatLobat'/h
+            # residua for the boundary conditions, Bl and Br should each
+            # return the vector of size at least nu*ns/2, the remaining
+            # boundary conditions are discarded
+            if i == 1
+                resBl = Bl(t,xl,xtl,ul,utl)
+                resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
+            elseif i == nx-1
+                resBr = Br(t,xr,xtr,ur,utr)
+                resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
+            end
 
-        end
-
-        # residua for the boundary conditions, Bl and Br should each
-        # return the vector of size at least nu*ns/2, the remaining
-        # boundary conditions are discarded
-        resBl = Bl(t,x[ 1],xt[ 1],u[:,:, 1],ut[:,:, 1])[1:nu*ns2]
-        resBr = Br(t,x[nx],xt[nx],u[:,:,nx],ut[:,:,nx])[1:nu*ns2]
-        resu[:,    1:ns2,nx] = reshape(resBl,nu,ns2)
-        resu[:,ns2+1:ns, nx] = reshape(resBr,nu,ns2)
-
-        #######################################################################
-        # mesh movement residua
-        #######################################################################
-        resx[ 1] = Bxl(t,x[ 1],xt[ 1],u[:,:, 1],ut[:,:, 1])
-        resx[nx] = Bxr(t,x[nx],xt[nx],u[:,:,nx],ut[:,:,nx])
-        for i = 1:nx-1
-            h  =  x[i+1]- x[i]
-            ht = xt[i+1]-xt[i]
-            ul = u[:,:,i  ]
-            ur = u[:,:,i+1]
-            utl= ut[:,:,i  ]
-            utr= ut[:,:,i+1]
-
-            # monitor function
+            #######################################################################
+            # mesh movement residua
+            #######################################################################
             if i==1 || i==nx-1
-                Mhalf[i] = (M(t,x[i],ul,utl)+M(t,x[i+1],ur,utr))/2
+                Mhalf[i] = (M(t,xl,ul,utl)+M(t,xr,ur,utr))/2
             else
-                xhalf  = x[i]+h/2
-                xthalf = xt[i]+ht/2
-                uhalf  = computeux(QsLobat[ns2+1],h,ul,ur)
+                xhalf  =  xl+ h/2
+                xthalf = xtl+ht/2
+                uhalf  =  computeux(QsLobat[ns2+1],h,ul,ur)
                 uthalf = computeutx(QsLobat[ns2+1],h,ht,xthalf,utl,utr,uhalf,ul,ur)
                 Mhalf[i] = M(t,xhalf,uhalf,uthalf)
             end
 
-            Yhalf[i+1] = -tau*(xt[i+1]-xt[i])/(x[i+1]-x[i])^2+1/(x[i+1]-x[i])
+            Yhalf[i+1] = -tau*(xtr-xtl)/(xr-xl)^2+1/(xr-xl)
+
+            if i == 1
+                resx[ 1] = Bxl(t,xl,xtl,ul,utl)
+            elseif i == nx-1
+                resx[nx] = Bxr(t,xr,xtr,ur,utr)
+            end
         end
 
         # boundary conditions for Yhalf
@@ -202,9 +201,20 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
             resx[i] = (Yhalf[i+1]-g*(Yhalf[i+2]-2*Yhalf[i+1]+Yhalf[i]))/Mhalf[i]-(Yhalf[i]-g*(Yhalf[i+1]-2*Yhalf[i]+Yhalf[i-1]))/Mhalf[i-1]
         end
 
-        return resu, resx
+        return copy(resu), copy(resx)
 
     end
+
+    function daewrapper(t,y,yt)
+         x =  y[1:nx];  u = reshape( y[nx+1:end],ns,nu,nx)
+        xt = yt[1:nx]; ut = reshape(yt[nx+1:end],ns,nu,nx)
+        resu,resx = computeres(t,x,xt,u,ut)
+        res[1:nx] = resx
+        res[nx+1:end] = resu
+        return copy(res)
+    end
+
+    return computeres, daewrapper
 
 end
 
