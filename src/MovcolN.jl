@@ -42,10 +42,17 @@ function generateQatx{T}(n,x::T;kmax=n)
 end
 
 
+# given the vectors ul=[u,ux,uxx,...]_(x=x[N]) and
+# ur=[u,ux,uxx,...]_(x=x[N+1]) generate a vector
+# ux=[u,ux,uxx,...]_(x=x[N]+s*h), where s is prescribed in Qs (this
+# descriptions of ul, ur and ux are oversimplification as each of them
+# holds the derivatives of more than just one function,
+# e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
+# performing linear operations on ul and ur via the matrices Qleft and
+# Qright.  The vector H is equal to [h^j for j=0:nq].
 function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::Matrix{T},ur::Matrix{T})
-    Qleft, Qright, _ = Qs
+    Qleft, Qright, s = Qs
     nd, nu = size(ul)
-    nq = size(Qleft,1)
 
     Hul = Array(T,nd)
     Hur = Array(T,nd)
@@ -54,16 +61,21 @@ function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::Matrix{T},ur::Matrix{T
         @devec Hul[:] = H[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*ur[:,i]
         ux[:,i] = Qleft*Hul + Qright*Hur
-        @devec ux[:,i] = ux[:,i]./H[1:nq]
+        @devec ux[:,i] = ux[:,i]./H
     end
 end
 
 
+# Function similar to computeux! but computing
+# utx=[ut,utx,utxx,...]. It requires more data (Ht,xt,utl,utr,ux)
+# because it has to account for the mesh translation and rescaling in
+# time.
 function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     Qleft, Qright, s = Qs
     nd, nu = size(utl)
     h  = H[2]
     ht = Ht[2]
+    xt = (xt+s*ht)
 
     Hul = Array(T,nd)
     Hur = Array(T,nd)
@@ -72,7 +84,6 @@ function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
         @devec Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
         utx[:,i] = Qleft*Hul+Qright*Hur
-        xt = (xt+s*ht)
         # upscale spatial derivatives
         @devec utx[:,i] = utx[:,i]./H
         for j = 1:size(utx,1)-1
@@ -82,6 +93,9 @@ function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     end
 end
 
+# For a given function F(t,u,ux,uxx,...,ut,utx,utxx,...) return the
+# value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
+# x=x[N]+s*h are computed via computeux! and computeutx! functions.
 function getcollocationvalues!(FVal,Qs,F,t,H,Ht,x,xt,ul,ur,utl,utr)
     h = H[2]                    # H[2] = h^1 = h
     T   = eltype(t)
@@ -113,32 +127,30 @@ end
 # generates the residual function of the equation eqn
 
 function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
-                       ns,      # number of derivatives to hold
+                       ns,      # number of collocation points (ns-Gauss and ns+1-Lobatto)
                        nu,      # number of dependent variables
                        nx)      # number of mesh points
 
-    if !(iseven(ns))
-        error("ns should be even")
-    end
+    if isodd(ns); error("ns should be even"); end
 
     T = Float64
 
     kmax = ns+1                 # maximal darivative is of rank kmax-1 = ns
     ns2 = Int(ns/2)
+
     sGauss, _ = gauss(ns)       # Gauss points
     sLobat, _ = lobatto(ns+1)   # Lobatto points
-
     QsGauss = map(x->generateQatx(ns,x,kmax=kmax),sGauss)
     QsLobat = map(x->generateQatx(ns,x,kmax=kmax),sLobat)
 
+    # all of these are temporary arrays needed by computeres
     FatGauss = Array(T,nu,ns  )
     GatLobat = Array(T,nu,ns+1)
-
-    resu     = Array(T,nu,ns,  nx)
-    resx     = Array(T,        nx)
+    resu     = Array(T,nu,ns,nx)
+    resx     = Array(T,nx)
     res      = Array(T,ns*nu*nx+nx)
-    Mhalf    = Array(T,        nx-1)
-    Yhalf    = Array(T,        nx+1)
+    Mhalf    = Array(T,nx-1)
+    Yhalf    = Array(T,nx+1)
     uhalf    = Array(T,ns+1,nu)
     uthalf   = Array(T,ns+1,nu)
 
