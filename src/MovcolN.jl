@@ -2,6 +2,7 @@ module MovcolN
 
 using Polynomials
 using Devectorize
+using DASSL
 
 include("polynomials.jl")       # polynomial related functions
 
@@ -12,14 +13,14 @@ abstract Equation
 
 # CollocationData is the same for every mesh point and it depends on
 # the number of collocation points (ns) only.
-immutable CollocationData{T<:Float64} # only works with Float64
+immutable CollocationData # only works with Float64
     ns        # number of derivatives provided at mesh points
 
     # vectors of tuples (Qleft, Qright, s)
-    gauss   :: Vector{(Matrix{T},Matrix{T},T)}
-    lobatto :: Vector{(Matrix{T},Matrix{T},T)}
+    gauss   :: Vector{(Matrix,Matrix,Real)}
+    lobatto :: Vector{(Matrix,Matrix,Real)}
 
-    AB :: Matrix{T}
+    AB :: Matrix
 end
 
 
@@ -193,7 +194,7 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
 end
 
 function computeresu{T}(pde :: Equation,
-                        coldata :: CollocationData{T},
+                        coldata :: CollocationData,
                         t  :: T,
                         x  :: Vector{T}, xt :: Vector{T},
                         u  :: Array{T,3},ut :: Array{T,3})
@@ -232,7 +233,7 @@ function computeresu{T}(pde :: Equation,
 end
 
 function computeresx{T}(pde :: Equation,
-                        coldata :: CollocationData{T},
+                        coldata :: CollocationData,
                         t :: T,
                         x :: Vector{T}, xt :: Vector{T},
                         u :: Array{T,3},ut :: Array{T,3})
@@ -291,5 +292,41 @@ function computeresx{T}(pde :: Equation,
 
 end
 
+function meshinit(pde :: Equation,
+                  coldata :: CollocationData,
+                  nx :: Int;
+                  eps :: Float64 = 1e-5,
+                  maxsteps :: Int = 1000,
+                  args...)
+
+    ns = coldata.ns
+    x0 = linspace(pde.xspan...,nx)
+
+    # fix the mesh endpoints
+    xpde = deepcopy(pde)
+    xpde.Bxl=(t,x,xt,u,ut)->xt
+    xpde.Bxr=(t,x,xt,u,ut)->xt
+
+    function dae(t,x,xt)
+        u    = reshape(vcat(map(pde.u0, x)...),ns,1,nx)
+        resx = computeresx(xpde,coldata,pde.t0,x,xt,u,u)
+        return resx
+    end
+
+    for (t,x,xt) in dasslIterator(dae,x0,0.0)
+        if norm(xt,Inf) < eps
+            info("Converged after $(length(t)) steps")
+            x0 = x
+            break
+        end
+        if length(t) > maxsteps
+            error("Unable to converge in $maxsteps steps")
+            break
+        end
+    end
+
+    return x0
+
+end
 
 end # module
