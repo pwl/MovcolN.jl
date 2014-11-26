@@ -146,9 +146,8 @@ end
 # value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
 # x=x[N]+s*h are computed via computeux! and computeutx! functions.
 function getcollocationvalues!{T}(FVal,Qs,F,t::T,mp::MeshPair{T})
-    x,_,ul,utl = mp.left
-    _,_,ur,utr = mp.right
-    xt = mp.xt
+    x,xt,ul,utl = mp.left
+    _,_ ,ur,utr = mp.right
     H,Ht = mp.H,mp.Ht
     ux  = Array(T,mp.nd+1,mp.nu)
     utx = Array(T,mp.nd+1,mp.nu)
@@ -202,7 +201,8 @@ function computeresu{T}(pde :: Equation,
         if i == 1
             resBl = pde.Bl(t,mp.left...)
             resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
-        elseif i == nx-1
+        end
+        if i == nx-1
             resBr = pde.Br(t,mp.right...)
             resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
         end
@@ -212,6 +212,8 @@ function computeresu{T}(pde :: Equation,
 
 end
 
+
+# compute residua for the mesh
 function computeresx{T}(pde :: Equation,
                         coldata :: CollocationData,
                         t :: T,
@@ -272,6 +274,8 @@ function computeresx{T}(pde :: Equation,
 
 end
 
+
+# creates a relaxed mesh
 function meshinit(pde :: Equation,
                   coldata :: CollocationData,
                   nx :: Int;
@@ -310,6 +314,41 @@ function meshinit(pde :: Equation,
     end
 
     return x0
+
+end
+
+function movcol_solve(pde :: Equation,
+                      nx :: Int,
+                      nd :: Int;
+                      args...)
+
+    coldata = CollocationData(nd)
+    if isodd(nd); error("nd should be even"); end
+    if nx < 2; error("nx should be at least 2"); end
+    nu = pde.nu
+    x0 = meshinit(pde,coldata,nx;args...)
+    u0 = reshape(vcat(map(pde.u0, x0)...),nd,nu,nx)
+
+    # wrapper function for DASSL
+    function dae(t,y,yt)
+        res = Array(eltype(x0),nd*nu*nx+nx)
+        # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
+         x =  y[1:nx];  u = reshape( y[nx+1:end],nd,nu,nx)
+        xt = yt[1:nx]; ut = reshape(yt[nx+1:end],nd,nu,nx)
+        resu = computeresu(pde,coldata,t,x,xt,u,ut)
+        resx = computeresx(pde,coldata,t,x,xt,u,ut)
+        res[1:nx] = resx
+        res[nx+1:end] = resu
+        return res
+    end
+
+    y0 = vcat(x0,vec(u0))
+
+    for (t,y,yt) in dasslIterator(dae,y0,pde.t0;args...)
+        if t > 1
+            return reshape(y[nx+1:end],nd,nu,nx)
+        end
+    end
 
 end
 
