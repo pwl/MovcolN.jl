@@ -6,7 +6,7 @@ using DASSL
 
 include("polynomials.jl")       # polynomial related functions
 
-export getcomputeres, Equation, CollocationData, computeresx
+export Equation, movcol_solve
 
 # Equation should consist of functions F,G,Bl,Br,M,g,tau,Bxl,Bxr,gamma
 abstract Equation
@@ -173,26 +173,6 @@ end
 #       function (nu)
 #
 
-# generates the residual function of the equation eqn
-function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
-                       ns,      # number of collocation points (ns-Gauss and ns+1-Lobatto)
-                       nu,      # number of dependent variables
-                       nx)      # number of mesh points
-
-    if isodd(ns); error("ns should be even"); end
-
-    # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
-
-    function daewrapper(t,y,yt)
-         x =  y[1:nx];  u = reshape( y[nx+1:end],ns,nu,nx)
-        xt = yt[1:nx]; ut = reshape(yt[nx+1:end],ns,nu,nx)
-        resu,resx = computeres(t,x,xt,u,ut)
-        res[1:nx] = resx
-        res[nx+1:end] = resu
-        return copy(res)
-    end
-end
-
 function computeresu{T}(pde :: Equation,
                         coldata :: CollocationData,
                         t  :: T,
@@ -295,31 +275,35 @@ end
 function meshinit(pde :: Equation,
                   coldata :: CollocationData,
                   nx :: Int;
-                  eps :: Float64 = 1e-5,
-                  maxsteps :: Int = 1000,
+                  mesherr = 1e-5,
+                  maxsteps = 1000,
                   args...)
 
     ns = coldata.ns
     x0 = linspace(pde.xspan...,nx)
+    x0t = zero(x0)
 
-    # fix the mesh endpoints
+    # Create a new pde with fixed mesh endpoints
     xpde = deepcopy(pde)
     xpde.Bxl=(t,x,xt,u,ut)->xt
     xpde.Bxr=(t,x,xt,u,ut)->xt
 
+    # wrapper function for DASSL
     function dae(t,x,xt)
-        u    = reshape(vcat(map(pde.u0, x)...),ns,1,nx)
-        resx = computeresx(xpde,coldata,pde.t0,x,xt,u,u)
+        u    = reshape(vcat(map(xpde.u0, x)...),ns,1,nx)
+        resx = computeresx(xpde,coldata,xpde.t0,x,xt,u,u)
         return resx
     end
 
-    for (t,x,xt) in dasslIterator(dae,x0,0.0)
-        if norm(xt,Inf) < eps
-            info("Converged after $(length(t)) steps")
-            x0 = x
+    nstp = 0
+    for (t,x,xt) in dasslIterator(dae,x0,0.0;reltol=mesherr*1e-2,abstol=mesherr*1e-2)
+        nstp += 1
+
+        if norm(xt,Inf) < mesherr
+            info("Mesh converged after $nstp steps")
+            x0  = x
             break
-        end
-        if length(t) > maxsteps
+        elseif nstp > maxsteps
             error("Unable to converge in $maxsteps steps")
             break
         end
