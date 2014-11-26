@@ -3,10 +3,58 @@ module MovcolN
 using Polynomials
 using Devectorize
 
-export getcomputeres
+include("polynomials.jl")       # polynomial related functions
 
-include("polynomials.jl")       # standard polynomial related
-                                # functions
+export getcomputeres, Equation, CollocationData, computeresx
+
+# Equation should consist of functions F,G,Bl,Br,M,g,tau,Bxl,Bxr,gamma
+abstract Equation
+
+# CollocationData is the same for every mesh point and it depends on
+# the number of collocation points (ns) only.
+immutable CollocationData{T<:Float64} # only works with Float64
+    ns        # number of derivatives provided at mesh points
+
+    # vectors of tuples (Qleft, Qright, s)
+    gauss   :: Vector{(Matrix{T},Matrix{T},T)}
+    lobatto :: Vector{(Matrix{T},Matrix{T},T)}
+
+    AB :: Matrix{T}
+end
+
+
+# @todo tests...
+function CollocationData(ns)
+    QsGauss   = map(s->generateQats(ns,s),  gauss(ns)[1])
+    QsLobatto = map(s->generateQats(ns,s),lobatto(ns+1)[1])
+    AB = generateAB(ns)
+    return CollocationData(ns,QsGauss,QsLobatto,AB)
+end
+
+
+immutable MeshPair{T}
+    left  :: (T,T,Array{T,2},Array{T,2})
+    right :: (T,T,Array{T,2},Array{T,2})
+    h     :: T
+    ht    :: T
+    H     :: Array{T,1}
+    Ht    :: Array{T,1}
+    xt    :: T
+    nd    :: Int
+    nu    :: Int
+end
+
+# @todo tests
+function MeshPair{T}(x::Vector{T},xt::Vector{T},u::Array{T,3},ut::Array{T,3},i::Int)
+    nd,nu,_ = size(u)
+    left  = (x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ])
+    right = (x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1])
+    h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
+    H  = [h^j for j=0:nd]
+    Ht = [j*ht*h^(j-1) for j=0:nd]
+    return MeshPair(left,right,h,ht,H,Ht,xt[i],nd,nu)
+end
+
 
 # create matrix AB=inv(A)*B with A and B such that A*Fi = B*Gi/Hi
 # (i.e. approximating F=∂ₓG), assuming that Fi is evaluated at Gauss
@@ -34,11 +82,11 @@ end
 #
 # @todo this wont work for integer xi, because it will try to convert
 # Rational into integer
-function generateQatx{T}(n,x::T;kmax=n)
+function generateQats{T}(n,s::T;kmax=n+1)
     L = hermite01(n)
-    Qleft  = T[polyval(polyder(L[1,j],i),x) for i=0:kmax-1, j=1:n]
-    Qright = T[polyval(polyder(L[2,j],i),x) for i=0:kmax-1, j=1:n]
-    return Qleft, Qright, x
+    Qleft  = T[polyval(polyder(L[1,j],i),s) for i=0:kmax-1, j=1:n]
+    Qright = T[polyval(polyder(L[2,j],i),s) for i=0:kmax-1, j=1:n]
+    return Qleft, Qright, s
 end
 
 
@@ -49,7 +97,7 @@ end
 # holds the derivatives of more than just one function,
 # e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
 # performing linear operations on ul and ur via the matrices Qleft and
-# Qright.  The vector H is equal to [h^j for j=0:nq].
+# Qright.  The vector H is equal to [h^j for j=0:nd+1].
 function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::Matrix{T},ur::Matrix{T})
     Qleft, Qright, s = Qs
     nd, nu = size(ul)
@@ -96,20 +144,19 @@ end
 # For a given function F(t,u,ux,uxx,...,ut,utx,utxx,...) return the
 # value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
 # x=x[N]+s*h are computed via computeux! and computeutx! functions.
-function getcollocationvalues!(FVal,Qs,F,t,H,Ht,x,xt,ul,ur,utl,utr)
-    h = H[2]                    # H[2] = h^1 = h
-    T   = eltype(t)
-    nq  = size(Qs[1][1],1)      # @todo get rid of nq and nu
-                                # altogether
-    nu  = size(ul,2)
-    ux  = Array(T,nq,nu)
-    utx = zero(ux)
+function getcollocationvalues!{T}(FVal,Qs,F,t::T,mp::MeshPair{T})
+    x,_,ul,utl = mp.left
+    _,_,ur,utr = mp.right
+    xt = mp.xt
+    H,Ht = mp.H,mp.Ht
+    ux  = Array(T,mp.nd+1,mp.nu)
+    utx = Array(T,mp.nd+1,mp.nu)
 
     for j = 1:length(Qs)
         _,_,s  = Qs[j]
-         computeux!( ux,Qs[j],H,ul,ur)
+         computeux!(ux, Qs[j],H,ul,ur)
         computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
-        xs  = x+s*h
+        xs  = x+s*mp.h
         FVal[:,j] = F(t,xs,ux,utx)
     end
 end
@@ -121,11 +168,11 @@ end
 #     /   point (nx)
 #    /   /
 # u[i,j,k]
-#     \
-#      function (nu)
+#      \
+#       function (nu)
 #
-# generates the residual function of the equation eqn
 
+# generates the residual function of the equation eqn
 function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
                        ns,      # number of collocation points (ns-Gauss and ns+1-Lobatto)
                        nu,      # number of dependent variables
@@ -133,100 +180,7 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
 
     if isodd(ns); error("ns should be even"); end
 
-    T = Float64
-
-    kmax = ns+1                 # maximal darivative is of rank kmax-1 = ns
-    ns2 = Int(ns/2)
-
-    sGauss, _ = gauss(ns)       # Gauss points
-    sLobat, _ = lobatto(ns+1)   # Lobatto points
-    QsGauss = map(x->generateQatx(ns,x,kmax=kmax),sGauss)
-    QsLobat = map(x->generateQatx(ns,x,kmax=kmax),sLobat)
-
-    # all of these are temporary arrays needed by computeres
-    FatGauss = Array(T,nu,ns  )
-    GatLobat = Array(T,nu,ns+1)
-    resu     = Array(T,nu,ns,nx)
-    resx     = Array(T,nx)
-    res      = Array(T,ns*nu*nx+nx)
-    Mhalf    = Array(T,nx-1)
-    Yhalf    = Array(T,nx+1)
-    uhalf    = Array(T,ns+1,nu)
-    uthalf   = Array(T,ns+1,nu)
-
-    AB = generateAB(ns)
-
-    function computeres{T}(t :: T,
-                           x :: Vector{T}, xt :: Vector{T},
-                           u :: Array{T,3},ut :: Array{T,3})
-
-        # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
-
-        for i = 1:nx-1
-            # @todo create an immutable with h,ht,ul,ur,utl,utr?
-             xl =  x[i];      xr =  x[i+1]
-            xtl = xt[i];     xtr = xt[i+1]
-             ul =  u[:,:,i];  ur =  u[:,:,i+1]
-            utl = ut[:,:,i]; utr = ut[:,:,i+1]
-            h  =  xr-xl; ht = xtr-xtl
-            H  = [h^j for j=0:ns]
-            Ht = [j*ht*h^(j-1) for j=0:ns]
-
-            #######################################################################
-            # pde residua
-            #######################################################################
-            getcollocationvalues!(FatGauss,QsGauss,F,t,H,Ht,xl,xtl,ul,ur,utl,utr)
-            getcollocationvalues!(GatLobat,QsLobat,G,t,H,Ht,xl,xtl,ul,ur,utl,utr)
-
-            # @todo change the definition of AB or FatGauss to remove
-            # the primes
-            resu[:,:,i] = FatGauss'-AB*GatLobat'/h
-            # residua for the boundary conditions, Bl and Br should each
-            # return the vector of size at least nu*ns/2, the remaining
-            # boundary conditions are discarded
-            if i == 1
-                resBl = Bl(t,xl,xtl,ul,utl)
-                resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
-            elseif i == nx-1
-                resBr = Br(t,xr,xtr,ur,utr)
-                resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
-            end
-
-            #######################################################################
-            # mesh movement residua
-            #######################################################################
-            if i==1 || i==nx-1
-                Mhalf[i] = (M(t,xl,ul,utl)+M(t,xr,ur,utr))/2
-            else
-                xhalf  =  xl+ h/2
-                xthalf = xtl+ht/2
-                 computeux!(uhalf, QsLobat[ns2+1],H,ul,ur)
-                computeutx!(uthalf,QsLobat[ns2+1],H,Ht,xthalf,utl,utr,uhalf,ul,ur)
-                Mhalf[i] = M(t,xhalf,uhalf,uthalf)
-            end
-
-            Yhalf[i+1] = -tau*(xtr-xtl)/(xr-xl)^2+1/(xr-xl)
-
-            if i == 1
-                resx[ 1] = Bxl(t,xl,xtl,ul,utl)
-            elseif i == nx-1
-                resx[nx] = Bxr(t,xr,xtr,ur,utr)
-            end
-        end
-
-        # boundary conditions for Yhalf
-        Yhalf[ 1 ] = Yhalf[  2  ]
-        Yhalf[end] = Yhalf[end-1]
-
-        # compute the residua for mesh movement
-        for i = 2:nx-1
-            g=gamma*(gamma+1)
-            resx[i] = (Yhalf[i+1]-g*(Yhalf[i+2]-2*Yhalf[i+1]+Yhalf[i]))/Mhalf[i]-(Yhalf[i]-g*(Yhalf[i+1]-2*Yhalf[i]+Yhalf[i-1]))/Mhalf[i-1]
-        end
-
-        return copy(resu), copy(resx)
-
-    end
+    # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
 
     function daewrapper(t,y,yt)
          x =  y[1:nx];  u = reshape( y[nx+1:end],ns,nu,nx)
@@ -236,9 +190,106 @@ function getcomputeres(F,G,Bl,Br,M,Bxl,Bxr,tau,gamma,
         res[nx+1:end] = resu
         return copy(res)
     end
+end
 
-    return computeres, daewrapper
+function computeresu{T}(pde :: Equation,
+                        coldata :: CollocationData{T},
+                        t  :: T,
+                        x  :: Vector{T}, xt :: Vector{T},
+                        u  :: Array{T,3},ut :: Array{T,3})
+    nd,nu,nx = size(u)
+    ns = nd
+    ns2 = Int(ns/2)
+
+    FGauss   = Array(T,nu,ns  )
+    GLobatto = Array(T,nu,ns+1)
+    resu     = Array(T,nu,ns,nx)
+
+    for i = 1:nx-1
+        mp = MeshPair(x,xt,u,ut,i)
+
+        getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,mp)
+        getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,mp)
+
+        # @todo change the definition of AB or FGauss to remove the
+        # primes
+        resu[:,:,i] = FGauss'-coldata.AB*GLobatto'/mp.h
+
+        # residua for the boundary conditions, Bl and Br should each
+        # return the vector of size at least nu*ns/2, the remaining
+        # boundary conditions are discarded
+        if i == 1
+            resBl = pde.Bl(t,mp.left...)
+            resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
+        elseif i == nx-1
+            resBr = pde.Br(t,mp.right...)
+            resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
+        end
+    end
+
+    return resu
 
 end
+
+function computeresx{T}(pde :: Equation,
+                        coldata :: CollocationData{T},
+                        t :: T,
+                        x :: Vector{T}, xt :: Vector{T},
+                        u :: Array{T,3},ut :: Array{T,3})
+
+    nd,nu,nx = size(u)
+    ns = nd                     # number of collocation points
+    ns2 = Int(ns/2)
+
+    uhalf    = Array(T,ns+1,nu)
+    uthalf   = Array(T,ns+1,nu)
+    resx     = Array(T,nx)
+    Mhalf    = Array(T,nx-1)
+    Yhalf    = Array(T,nx+1)
+
+    Qshalf = coldata.lobatto[ns2+1]
+
+    for i = 1:nx-1
+        mp = MeshPair(x,xt,u,ut,i)
+        xl,xtl,ul,utl = mp.left
+        xr,xtr,ur,utr = mp.right
+        h, ht, H, Ht = mp.h, mp.ht, mp.H, mp.Ht
+
+        if i==1 || i==nx-1
+            Mhalf[i] = (pde.M(t,xl,ul)+pde.M(t,xr,ur))/2
+        else
+            xhalf  =  xl+ h/2
+            xthalf = xtl+ht/2
+             computeux!(uhalf, Qshalf,H,ul,ur)
+            computeutx!(uthalf,Qshalf,H,Ht,xthalf,utl,utr,uhalf,ul,ur)
+            Mhalf[i] = pde.M(t,xhalf,uhalf)
+        end
+
+        Yhalf[i+1] = -pde.tau*(xtr-xtl)/(xr-xl)^2+1/(xr-xl)
+
+        if i == 1
+            resx[ 1] = pde.Bxl(t,xl,xtl,ul,utl)
+        end
+        if i == nx-1
+            resx[nx] = pde.Bxr(t,xr,xtr,ur,utr)
+        end
+    end
+
+    # boundary conditions for Yhalf
+    Yhalf[ 1 ] = Yhalf[  2  ]
+    Yhalf[end] = Yhalf[end-1]
+
+    # @todo add monitor smoothing
+
+    # compute the residua for mesh movement
+    for i = 2:nx-1
+        g=pde.gamma*(pde.gamma+1)
+        resx[i] = (Yhalf[i+1]-g*(Yhalf[i+2]-2*Yhalf[i+1]+Yhalf[i]))/Mhalf[i]-(Yhalf[i]-g*(Yhalf[i+1]-2*Yhalf[i]+Yhalf[i-1]))/Mhalf[i-1]
+    end
+
+    return resx
+
+end
+
 
 end # module
