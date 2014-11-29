@@ -194,19 +194,17 @@ function computeresu{T}(pde :: Equation,
         # @todo change the definition of AB or FGauss to remove the
         # primes
         resu[:,:,i] = FGauss'-coldata.AB*GLobatto'/mp.h
-
-        # residua for the boundary conditions, Bl and Br should each
-        # return the vector of size at least nu*ns/2, the remaining
-        # boundary conditions are discarded
-        if i == 1
-            resBl = pde.Bl(t,mp.left...)
-            resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
-        end
-        if i == nx-1
-            resBr = pde.Br(t,mp.right...)
-            resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
-        end
     end
+
+    # residua for the boundary conditions, Bl and Br should each
+    # return the vector of size at least nu*ns/2, the remaining
+    # boundary conditions are discarded
+    mp1  = MeshPair(x,xt,u,ut,1 )
+    mpnx = MeshPair(x,xt,u,ut,nx-1)
+    resBl = pde.Bl(t,mp1.left...)
+    resBr = pde.Bl(t,mpnx.right...)
+    resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
+    resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
 
     return resu
 
@@ -346,9 +344,11 @@ function movcol_solve(pde :: Equation,
 
     for (t,y,yt) in dasslIterator(dae,y0,pde.t0;args...)
         if t > 1
-            return reshape(y[nx+1:end],nd,nu,nx)
+            return (t,y,yt)
         end
     end
+
+    return y0,dae
 
 end
 
