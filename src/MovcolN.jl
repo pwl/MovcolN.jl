@@ -3,6 +3,7 @@ module MovcolN
 using Polynomials
 using Devectorize
 using DASSL
+using ArrayViews
 
 include("polynomials.jl")       # polynomial related functions
 
@@ -34,8 +35,8 @@ end
 
 
 immutable MeshPair{T}
-    left  :: (T,T,Array{T,2},Array{T,2})
-    right :: (T,T,Array{T,2},Array{T,2})
+    left  :: (T,T,AbstractArray{T,2},AbstractArray{T,2})
+    right :: (T,T,AbstractArray{T,2},AbstractArray{T,2})
     h     :: T
     ht    :: T
     H     :: Array{T,1}
@@ -50,6 +51,8 @@ function MeshPair{T}(x::Vector{T},xt::Vector{T},u::Array{T,3},ut::Array{T,3},i::
     nd,nu,_ = size(u)
     left  = (x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ])
     right = (x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1])
+    left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
+    right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
     h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
     H  = [h^j for j=0:nd]
     Ht = [j*ht*h^(j-1) for j=0:nd]
@@ -99,7 +102,7 @@ end
 # e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
 # performing linear operations on ul and ur via the matrices Qleft and
 # Qright.  The vector H is equal to [h^j for j=0:nd+1].
-function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::Matrix{T},ur::Matrix{T})
+function computeux!{T}(ux::AbstractArray{T,2},Qs,H::AbstractVector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
     Qleft, Qright, s = Qs
     nd, nu = size(ul)
 
@@ -119,7 +122,7 @@ end
 # utx=[ut,utx,utxx,...]. It requires more data (Ht,xt,utl,utr,ux)
 # because it has to account for the mesh translation and rescaling in
 # time.
-function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
+function computeutx!{T}(utx::AbstractArray{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     Qleft, Qright, s = Qs
     nd, nu = size(utl)
     h  = H[2]
@@ -179,7 +182,7 @@ function computeresu{T}(pde :: Equation,
                         u  :: Array{T,3},ut :: Array{T,3})
     nd,nu,nx = size(u)
     ns = nd
-    ns2 = Int(ns/2)
+    ns2 = int(ns/2)
 
     FGauss   = Array(T,nu,ns  )
     GLobatto = Array(T,nu,ns+1)
@@ -220,7 +223,7 @@ function computeresx{T}(pde :: Equation,
 
     nd,nu,nx = size(u)
     ns = nd                     # number of collocation points
-    ns2 = Int(ns/2)
+    ns2 = int(ns/2)
 
     uhalf    = Array(T,ns+1,nu)
     uthalf   = Array(T,ns+1,nu)
@@ -347,8 +350,6 @@ function movcol_solve(pde :: Equation,
             return (t,y,yt)
         end
     end
-
-    return y0,dae
 
 end
 
