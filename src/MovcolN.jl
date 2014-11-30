@@ -21,8 +21,8 @@ end
 immutable MeshPoint
     x  :: Float64
     xt :: Float64
-    u  :: Matrix{Float64}
-    ut :: Matrix{Float64}
+    u  :: AbstractMatrix{Float64}
+    ut :: AbstractMatrix{Float64}
     nd :: Int
     nu :: Int
 end
@@ -198,10 +198,8 @@ function computeresu{T}(pde :: Equation,
 
     for i = 1:nx-1
 
-        # left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
-        # right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
-        left  = MeshPoint(x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ], nd, nu)
-        right = MeshPoint(x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1], nd, nu)
+        left  = MeshPoint(x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ), nd, nu)
+        right = MeshPoint(x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1), nd, nu)
         h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
         H  = [h^j for j=0:nd]
         Ht = [j*ht*h^(j-1) for j=0:nd]
@@ -247,9 +245,9 @@ function computeresx{T}(pde :: Equation,
     Qshalf = coldata.lobatto[ns2+1]
 
     for i = 1:nx-1
-        xl = x[i  ]; xtl = xt[i  ]; ul = u[:,:,i  ]; utl = ut[:,:,i  ]
-        xr = x[i+1]; xtr = xt[i+1]; ur = u[:,:,i+1]; utr = ut[:,:,i+1]
-        h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
+        xl = x[i  ]; xtl = xt[i  ]; ul = view(u,:,:,i  ); utl = view(ut,:,:,i  )
+        xr = x[i+1]; xtr = xt[i+1]; ur = view(u,:,:,i+1); utr = view(ut,:,:,i+1)
+        h  = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
         H  = [h^j for j=0:nd]
         Ht = [j*ht*h^(j-1) for j=0:nd]
 
