@@ -34,32 +34,6 @@ function CollocationData(ns)
 end
 
 
-immutable MeshPair{T}
-    left  :: (T,T,AbstractArray{T,2},AbstractArray{T,2})
-    right :: (T,T,AbstractArray{T,2},AbstractArray{T,2})
-    h     :: T
-    ht    :: T
-    H     :: Array{T,1}
-    Ht    :: Array{T,1}
-    xt    :: T
-    nd    :: Int
-    nu    :: Int
-end
-
-# @todo tests
-function MeshPair{T}(x::Vector{T},xt::Vector{T},u::Array{T,3},ut::Array{T,3},i::Int)
-    nd,nu,_ = size(u)
-    left  = (x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ])
-    right = (x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1])
-    left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
-    right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
-    h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
-    H  = [h^j for j=0:nd]
-    Ht = [j*ht*h^(j-1) for j=0:nd]
-    return MeshPair(left,right,h,ht,H,Ht,xt[i],nd,nu)
-end
-
-
 # create matrix AB=inv(A)*B with A and B such that A*Fi = B*Gi/Hi
 # (i.e. approximating F=∂ₓG), assuming that Fi is evaluated at Gauss
 # points and Gi is evaluated at Lobatto points.  The dimensions of A
@@ -148,18 +122,18 @@ end
 # For a given function F(t,u,ux,uxx,...,ut,utx,utxx,...) return the
 # value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
 # x=x[N]+s*h are computed via computeux! and computeutx! functions.
-function getcollocationvalues!{T}(FVal,Qs,F,t::T,mp::MeshPair{T})
-    x,xt,ul,utl = mp.left
-    _,_ ,ur,utr = mp.right
-    H,Ht = mp.H,mp.Ht
-    ux  = Array(T,mp.nd+1,mp.nu)
-    utx = Array(T,mp.nd+1,mp.nu)
+function getcollocationvalues!{T}(FVal,Qs,F,t::T,left,right,H,Ht)
+    x,xt,ul,utl = left
+    _,_ ,ur,utr = right
+    nd, nu = size(ul)
+    ux  = Array(T,nd+1,nu)
+    utx = Array(T,nd+1,nu)
 
     for j = 1:length(Qs)
         _,_,s  = Qs[j]
          computeux!(ux, Qs[j],H,ul,ur)
         computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
-        xs  = x+s*mp.h
+        xs  = x+s*H[2]          # H[2] == h
         FVal[:,j] = F(t,xs,ux,utx)
     end
 end
@@ -189,23 +163,26 @@ function computeresu{T}(pde :: Equation,
     resu     = Array(T,nu,ns,nx)
 
     for i = 1:nx-1
-        mp = MeshPair(x,xt,u,ut,i)
 
-        getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,mp)
-        getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,mp)
+        left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
+        right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
+        h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
+        H  = [h^j for j=0:nd]
+        Ht = [j*ht*h^(j-1) for j=0:nd]
+
+        getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,left,right,H,Ht)
+        getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,left,right,H,Ht)
 
         # @todo change the definition of AB or FGauss to remove the
         # primes
-        resu[:,:,i] = FGauss'-coldata.AB*GLobatto'/mp.h
+        resu[:,:,i] = FGauss'-coldata.AB*GLobatto'/h
     end
 
     # residua for the boundary conditions, Bl and Br should each
     # return the vector of size at least nu*ns/2, the remaining
     # boundary conditions are discarded
-    mp1  = MeshPair(x,xt,u,ut,1 )
-    mpnx = MeshPair(x,xt,u,ut,nx-1)
-    resBl = pde.Bl(t,mp1.left...)
-    resBr = pde.Bl(t,mpnx.right...)
+    resBl = pde.Bl(t,x[1  ],xt[1  ],view(u,:,:,1  ),view(ut,:,:,1  ))
+    resBr = pde.Bl(t,x[end],xt[end],view(u,:,:,end),view(ut,:,:,end))
     resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
     resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
 
@@ -234,10 +211,14 @@ function computeresx{T}(pde :: Equation,
     Qshalf = coldata.lobatto[ns2+1]
 
     for i = 1:nx-1
-        mp = MeshPair(x,xt,u,ut,i)
-        xl,xtl,ul,utl = mp.left
-        xr,xtr,ur,utr = mp.right
-        h, ht, H, Ht = mp.h, mp.ht, mp.H, mp.Ht
+        left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
+        right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
+        h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
+        H  = [h^j for j=0:nd]
+        Ht = [j*ht*h^(j-1) for j=0:nd]
+
+        xl,xtl,ul,utl = left
+        xr,xtr,ur,utr = right
 
         if i==1 || i==nx-1
             Mhalf[i] = (pde.M(t,xl,ul)+pde.M(t,xr,ur))/2
