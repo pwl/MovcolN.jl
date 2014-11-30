@@ -12,14 +12,29 @@ export Equation, movcol_solve
 # Equation should consist of functions F,G,Bl,Br,M,g,tau,Bxl,Bxr,gamma
 abstract Equation
 
+immutable CollocationPoint
+    left  :: Matrix{Float64}
+    right :: Matrix{Float64}
+    s     :: Float64
+end
+
+immutable MeshPoint
+    x  :: Float64
+    xt :: Float64
+    u  :: Matrix{Float64}
+    ut :: Matrix{Float64}
+    nd :: Int
+    nu :: Int
+end
+
 # CollocationData is the same for every mesh point and it depends on
 # the number of collocation points (ns) only.
 immutable CollocationData # only works with Float64
     ns :: Int        # number of derivatives provided at mesh points
 
     # vectors of tuples (Qleft, Qright, s)
-    gauss   :: Vector{(Matrix{Float64},Matrix{Float64},Float64)}
-    lobatto :: Vector{(Matrix{Float64},Matrix{Float64},Float64)}
+    gauss   :: Vector{CollocationPoint}
+    lobatto :: Vector{CollocationPoint}
 
     AB :: Matrix{Float64}
 end
@@ -64,7 +79,7 @@ function generateQats{T}(n,s::T;kmax=n+1)
     L = hermite01(n)
     Qleft  = T[polyval(polyder(L[1,j],i),s) for i=0:kmax-1, j=1:n]
     Qright = T[polyval(polyder(L[2,j],i),s) for i=0:kmax-1, j=1:n]
-    return Qleft, Qright, s
+    return CollocationPoint(Qleft,Qright,s)
 end
 
 
@@ -76,8 +91,7 @@ end
 # e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
 # performing linear operations on ul and ur via the matrices Qleft and
 # Qright.  The vector H is equal to [h^j for j=0:nd+1].
-function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
-    Qleft, Qright, s = Qs
+function computeux!{T}(ux::Array{T,2},Q::CollocationPoint,H::Vector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
     nd, nu = size(ul)
 
     Hul = Array(T,nd)
@@ -87,7 +101,7 @@ function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::AbstractMatrix{T},ur::
     for i=1:nu
         @devec Hul[:] = H[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*ur[:,i]
-        mult_lr!(res,Qleft,Qright,Hul,Hur)
+        mult_lr!(res,Q.left,Q.right,Hul,Hur)
         @devec ux[:,i] = res./H
     end
 end
@@ -96,12 +110,11 @@ end
 # utx=[ut,utx,utxx,...]. It requires more data (Ht,xt,utl,utr,ux)
 # because it has to account for the mesh translation and rescaling in
 # time.
-function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
-    Qleft, Qright, s = Qs
+function computeutx!{T}(utx::Array{T,2},Q::CollocationPoint,H::Vector{T},Ht::Vector{T},xt::T,utl,utr,ux,ul,ur)
     nd, nu = size(utl)
     h  = H[2]
     ht = Ht[2]
-    xt = (xt+s*ht)
+    xt = (xt+Q.s*ht)
 
     Hul = Array(T,nd)
     Hur = Array(T,nd)
@@ -110,7 +123,7 @@ function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     for i = 1:nu
         @devec Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
-        mult_lr!(res,Qleft,Qright,Hul,Hur)
+        mult_lr!(res,Q.left,Q.right,Hul,Hur)
         # upscale spatial derivatives
         scaling_utx!(utx,res,xt,ux,H,Ht,i)
     end
@@ -136,25 +149,23 @@ end
 # For a given function F(t,u,ux,uxx,...,ut,utx,utxx,...) return the
 # value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
 # x=x[N]+s*h are computed via computeux! and computeutx! functions.
-function getcollocationvalues!{T}(FVal,Qs,F,t::T,left,right,H,Ht)
-    x,xt,ul,utl = left
-    _,_ ,ur,utr = right
-    nd, nu = size(ul)
-    ux  = Array(T,nd+1,nu)
-    utx = Array(T,nd+1,nu)
+function getcollocationvalues!{T}(FVal,Qs::Vector{CollocationPoint},F,t::T,left,right,H,Ht)
+    ux  = Array(T,left.nd+1,left.nu)
+    utx = Array(T,left.nd+1,left.nu)
     h = H[2]
 
     for j = 1:length(Qs)
-        _,_,s  = Qs[j]
+        s = Qs[j].s
 
         if s == zero(T)
-            FVal[:,j] = F(t,x,ul,utl)
+            FVal[:,j] = F(t,left.x,left.u,left.ut)
         elseif s == zero(T)
-            FVal[:,j] = F(t,x+h,ur,utr)
+            FVal[:,j] = F(t,right.x,right.u,right.ut)
         else
+            x = left.x; xt = left.xt
             xs  = x+s*h
-             computeux!(ux, Qs[j],H,ul,ur)
-            computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
+             computeux!(ux, Qs[j],H,left.u,right.u)
+            computeutx!(utx,Qs[j],H,Ht,xt,left.ut,right.ut,ux,left.u,right.u)
             FVal[:,j] = F(t,xs,ux,utx)
         end
 
@@ -179,7 +190,7 @@ function computeresu{T}(pde :: Equation,
                         u  :: Array{T,3},ut :: Array{T,3})
     nd,nu,nx = size(u)
     ns = nd
-    ns2 = int(ns/2)
+    ns2 = div(ns,2)
 
     FGauss   = Array(T,nu,ns  )
     GLobatto = Array(T,nu,ns+1)
@@ -189,8 +200,8 @@ function computeresu{T}(pde :: Equation,
 
         # left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
         # right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
-        left  = (x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ])
-        right = (x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1])
+        left  = MeshPoint(x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ], nd, nu)
+        right = MeshPoint(x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1], nd, nu)
         h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
         H  = [h^j for j=0:nd]
         Ht = [j*ht*h^(j-1) for j=0:nd]
@@ -225,7 +236,7 @@ function computeresx{T}(pde :: Equation,
 
     nd,nu,nx = size(u)
     ns = nd                     # number of collocation points
-    ns2 = int(ns/2)
+    ns2 = div(ns,2)
 
     uhalf    = Array(T,ns+1,nu)
     uthalf   = Array(T,ns+1,nu)
@@ -236,20 +247,17 @@ function computeresx{T}(pde :: Equation,
     Qshalf = coldata.lobatto[ns2+1]
 
     for i = 1:nx-1
-        left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
-        right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
+        xl = x[i  ]; xtl = xt[i  ]; ul = u[:,:,i  ]; utl = ut[:,:,i  ]
+        xr = x[i+1]; xtr = xt[i+1]; ur = u[:,:,i+1]; utr = ut[:,:,i+1]
         h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
         H  = [h^j for j=0:nd]
         Ht = [j*ht*h^(j-1) for j=0:nd]
 
-        xl,xtl,ul,utl = left
-        xr,xtr,ur,utr = right
-
         if i==1 || i==nx-1
             Mhalf[i] = (pde.M(t,xl,ul)+pde.M(t,xr,ur))/2
         else
-            xhalf  =  xl+ h/2
-            xthalf = xtl+ht/2
+            xhalf  = (xl+xr)/2
+            xthalf = (xtl+xtr)/2
              computeux!(uhalf, Qshalf,H,ul,ur)
             computeutx!(uthalf,Qshalf,H,Ht,xthalf,utl,utr,uhalf,ul,ur)
             Mhalf[i] = pde.M(t,xhalf,uhalf)

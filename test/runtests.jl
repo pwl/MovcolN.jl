@@ -68,30 +68,4 @@ facts("Generating AB matrix") do
     @fact absconv.<0.1 => all  # absolute error is at most ~O(0.1^n)
 end
 
-facts("MeshPair sanity check") do
-
-    nx = 2
-    nd = 4
-    u0(x) = [x^3,3x^2,6x,6]
-    ut0(x) = [6x,6,0,0]
-    x  = Float64[0,1]
-    xt = zero(x)
-    u  = reshape(vcat(map(u0, x)...),nd,1,nx)
-    ut = reshape(vcat(map(ut0,x)...),nd,1,nx)
-    y  = [x,vec(u)]
-    yt = [xt,vec(ut)]
-
-    mp=MovcolN.MeshPair(x,xt,u,ut,1)
-
-    @fact mp.nd => nd
-    @fact mp.nu => 1
-    @fact mp.h  => 1
-    @fact mp.ht => 0
-    @fact mp.H  => Float64[1,1,1,1,1]
-    @fact mp.Ht => Float64[0,0,0,0,0]
-    @fact mp.left  =>(0.,0.,hcat(u0(0.)),hcat(ut0(0.)))
-    @fact mp.right =>(1.,0.,hcat(u0(1.)),hcat(ut0(1.)))
-
-end
-
 end

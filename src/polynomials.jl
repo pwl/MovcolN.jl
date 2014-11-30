@@ -32,10 +32,11 @@ end
 # Generates hermite interpolation polynomials for the interval s∈[0,1]
 # and valid for the first N derivatives (i.e. N=0 generates
 # ps[1,1]=s-1 and ps[1,1]=s) etc.
-function hermite01(n;T=Rational{Int})
+function hermite01(n::Int)
 
-    e  = eye(T,2n)
-    M  = zeros(T,2n,2n)
+    T = Rational{Int}
+    e = eye(T,2n)
+    M = zeros(T,2n,2n)
 
     for j = 1:2n
         p = Poly(e[:,j])
@@ -45,8 +46,9 @@ function hermite01(n;T=Rational{Int})
         end
     end
 
-    M⁻¹ = inv(full(M))          # here M⁻¹ is exact, typeof(M⁻¹) =
-                                # Array{Rational{Int},2}
+    M⁻¹ = inv(M)                # here M⁻¹ is exact,
+                                # typeof(M⁻¹)=Array{Rational{Int},2}
+
     ps = [ Poly(M⁻¹*e[:,i]) for i = 1:2n]
     return reshape(ps,n,2)'
 
