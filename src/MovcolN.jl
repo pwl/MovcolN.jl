@@ -15,13 +15,13 @@ abstract Equation
 # CollocationData is the same for every mesh point and it depends on
 # the number of collocation points (ns) only.
 immutable CollocationData # only works with Float64
-    ns        # number of derivatives provided at mesh points
+    ns :: Int        # number of derivatives provided at mesh points
 
     # vectors of tuples (Qleft, Qright, s)
-    gauss   :: Vector{(Matrix,Matrix,Real)}
-    lobatto :: Vector{(Matrix,Matrix,Real)}
+    gauss   :: Vector{(Matrix{Float64},Matrix{Float64},Float64)}
+    lobatto :: Vector{(Matrix{Float64},Matrix{Float64},Float64)}
 
-    AB :: Matrix
+    AB :: Matrix{Float64}
 end
 
 
@@ -76,27 +76,27 @@ end
 # e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
 # performing linear operations on ul and ur via the matrices Qleft and
 # Qright.  The vector H is equal to [h^j for j=0:nd+1].
-function computeux!{T}(ux::AbstractArray{T,2},Qs,H::AbstractVector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
+function computeux!{T}(ux::Array{T,2},Qs,H::Vector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
     Qleft, Qright, s = Qs
     nd, nu = size(ul)
 
     Hul = Array(T,nd)
     Hur = Array(T,nd)
+    res = Array(T,nd+1)
 
     for i=1:nu
         @devec Hul[:] = H[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*ur[:,i]
-        ux[:,i] = Qleft*Hul + Qright*Hur
-        @devec ux[:,i] = ux[:,i]./H
+        mult_lr!(res,Qleft,Qright,Hul,Hur)
+        @devec ux[:,i] = res./H
     end
 end
-
 
 # Function similar to computeux! but computing
 # utx=[ut,utx,utxx,...]. It requires more data (Ht,xt,utl,utr,ux)
 # because it has to account for the mesh translation and rescaling in
 # time.
-function computeutx!{T}(utx::AbstractArray{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
+function computeutx!{T}(utx::Array{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
     Qleft, Qright, s = Qs
     nd, nu = size(utl)
     h  = H[2]
@@ -105,17 +105,31 @@ function computeutx!{T}(utx::AbstractArray{T,2},Qs,H,Ht,xt,utl,utr,ux,ul,ur)
 
     Hul = Array(T,nd)
     Hur = Array(T,nd)
+    res = Array(T,nd+1)
 
     for i = 1:nu
         @devec Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
         @devec Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
-        utx[:,i] = Qleft*Hul+Qright*Hur
+        mult_lr!(res,Qleft,Qright,Hul,Hur)
         # upscale spatial derivatives
-        @devec utx[:,i] = utx[:,i]./H
-        for j = 1:size(utx,1)-1
-            # correct for the dilation and shift of the mesh
-            utx[j,i] += -((j-1)*ht/h*ux[j,i]+xt*ux[j+1,i]) # j*ht*h^(j-1) = d/dt(h^j)
+        scaling_utx!(utx,res,xt,ux,H,Ht,i)
+    end
+end
+
+function mult_lr!(res,Qleft,Qright,Hul,Hur)
+    nd = length(Hul)
+    for i = 1:nd+1
+        res[i] = 0
+        for j = 1:nd
+            @inbounds res[i] += Hul[j]*Qleft[i,j]+Hur[j]*Qright[i,j]
         end
+    end
+end
+
+# correct for the mesh rescaling, dilation and shift of the mesh
+function scaling_utx!(utx,res,xt,ux,H,Ht,i)
+    for j = 1:length(res)-1
+        @inbounds utx[j,i] = (res[j]-Ht[j]*ux[j,i])/H[j]-xt*ux[j+1,i]
     end
 end
 
@@ -128,13 +142,22 @@ function getcollocationvalues!{T}(FVal,Qs,F,t::T,left,right,H,Ht)
     nd, nu = size(ul)
     ux  = Array(T,nd+1,nu)
     utx = Array(T,nd+1,nu)
+    h = H[2]
 
     for j = 1:length(Qs)
         _,_,s  = Qs[j]
-         computeux!(ux, Qs[j],H,ul,ur)
-        computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
-        xs  = x+s*H[2]          # H[2] == h
-        FVal[:,j] = F(t,xs,ux,utx)
+
+        if s == zero(T)
+            FVal[:,j] = F(t,x,ul,utl)
+        elseif s == zero(T)
+            FVal[:,j] = F(t,x+h,ur,utr)
+        else
+            xs  = x+s*h
+             computeux!(ux, Qs[j],H,ul,ur)
+            computeutx!(utx,Qs[j],H,Ht,xt,utl,utr,ux,ul,ur)
+            FVal[:,j] = F(t,xs,ux,utx)
+        end
+
     end
 end
 
@@ -164,8 +187,10 @@ function computeresu{T}(pde :: Equation,
 
     for i = 1:nx-1
 
-        left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
-        right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
+        # left  = (x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ))
+        # right = (x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1))
+        left  = (x[i  ],xt[i  ],u[:,:,i  ],ut[:,:,i  ])
+        right = (x[i+1],xt[i+1],u[:,:,i+1],ut[:,:,i+1])
         h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
         H  = [h^j for j=0:nd]
         Ht = [j*ht*h^(j-1) for j=0:nd]
@@ -181,8 +206,8 @@ function computeresu{T}(pde :: Equation,
     # residua for the boundary conditions, Bl and Br should each
     # return the vector of size at least nu*ns/2, the remaining
     # boundary conditions are discarded
-    resBl = pde.Bl(t,x[1  ],xt[1  ],view(u,:,:,1  ),view(ut,:,:,1  ))
-    resBr = pde.Bl(t,x[end],xt[end],view(u,:,:,end),view(ut,:,:,end))
+    resBl = pde.Bl(t,x[1  ],xt[1  ],view(u,:,:,1 ),view(ut,:,:,1 ))
+    resBr = pde.Bl(t,x[end],xt[end],view(u,:,:,nx),view(ut,:,:,nx))
     resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
     resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
 
