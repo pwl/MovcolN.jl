@@ -12,6 +12,22 @@ export Equation, movcol_solve
 # Equation should consist of functions F,G,Bl,Br,M,g,tau,Bxl,Bxr,gamma
 abstract Equation
 
+immutable TemporaryArrays
+    Hul :: Vector{Float64}
+    Hur :: Vector{Float64}
+    res :: Vector{Float64}
+    ux  :: Matrix{Float64}
+    utx :: Matrix{Float64}
+end
+
+function TemporaryArrays(nd,nu)
+    TemporaryArrays(Array(Float64,nd),
+                    Array(Float64,nd),
+                    Array(Float64,nd+1),
+                    Array(Float64,nd+1,nu),
+                    Array(Float64,nd+1,nu))
+end
+
 immutable CollocationPoint
     left  :: Matrix{Float64}
     right :: Matrix{Float64}
@@ -91,18 +107,15 @@ end
 # e.g. ul[j,i]=∂ⱼuᵢ(x[N]) ).  Generation of ux is realized by
 # performing linear operations on ul and ur via the matrices Qleft and
 # Qright.  The vector H is equal to [h^j for j=0:nd+1].
-function computeux!{T}(ux::Array{T,2},Q::CollocationPoint,H::Vector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T})
-    nd, nu = size(ul)
-
-    Hul = Array(T,nd)
-    Hur = Array(T,nd)
-    res = Array(T,nd+1)
+function computeux!{T}(ux::Array{T,2},Q::CollocationPoint,H::Vector{T},ul::AbstractMatrix{T},ur::AbstractMatrix{T},tmp)
+    nd = size(ul,1)
+    nu = size(ul,2)
 
     for i=1:nu
-        @devec Hul[:] = H[1:nd].*ul[:,i]
-        @devec Hur[:] = H[1:nd].*ur[:,i]
-        mult_lr!(res,Q.left,Q.right,Hul,Hur)
-        @devec ux[:,i] = res./H
+        @devec tmp.Hul[:] = H[1:nd].*ul[:,i]
+        @devec tmp.Hur[:] = H[1:nd].*ur[:,i]
+        mult_lr!(tmp.res,Q.left,Q.right,tmp.Hul,tmp.Hur)
+        @devec ux[:,i] = tmp.res./H
     end
 end
 
@@ -110,22 +123,19 @@ end
 # utx=[ut,utx,utxx,...]. It requires more data (Ht,xt,utl,utr,ux)
 # because it has to account for the mesh translation and rescaling in
 # time.
-function computeutx!{T}(utx::Array{T,2},Q::CollocationPoint,H::Vector{T},Ht::Vector{T},xt::T,utl,utr,ux,ul,ur)
-    nd, nu = size(utl)
+function computeutx!{T}(utx::Array{T,2},Q::CollocationPoint,H::Vector{T},Ht::Vector{T},xt::T,utl,utr,ux,ul,ur,tmp)
+    nd = size(utl,1)
+    nu = size(utl,2)
     h  = H[2]
     ht = Ht[2]
     xt = (xt+Q.s*ht)
 
-    Hul = Array(T,nd)
-    Hur = Array(T,nd)
-    res = Array(T,nd+1)
-
     for i = 1:nu
-        @devec Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
-        @devec Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
-        mult_lr!(res,Q.left,Q.right,Hul,Hur)
+        @devec tmp.Hul[:] = H[1:nd].*utl[:,i]+Ht[1:nd].*ul[:,i]
+        @devec tmp.Hur[:] = H[1:nd].*utr[:,i]+Ht[1:nd].*ur[:,i]
+        mult_lr!(tmp.res,Q.left,Q.right,tmp.Hul,tmp.Hur)
         # upscale spatial derivatives
-        scaling_utx!(utx,res,xt,ux,H,Ht,i)
+        scaling_utx!(utx,tmp.res,xt,ux,H,Ht,i)
     end
 end
 
@@ -149,24 +159,22 @@ end
 # For a given function F(t,u,ux,uxx,...,ut,utx,utxx,...) return the
 # value F_(x=x[N]+s*h).  The spatial and temporal derivatives at
 # x=x[N]+s*h are computed via computeux! and computeutx! functions.
-function getcollocationvalues!{T}(FVal,Qs::Vector{CollocationPoint},F,t::T,left,right,H,Ht)
-    ux  = Array(T,left.nd+1,left.nu)
-    utx = Array(T,left.nd+1,left.nu)
+function getcollocationvalues!{T}(FVal,Qs::Vector{CollocationPoint},F,t::T,left,right,H,Ht,tmp)
     h = H[2]
 
-    for j = 1:length(Qs)
+    for j = 1:size(FVal,1)
         s = Qs[j].s
 
         if s == zero(T)
-            FVal[:,j] = F(t,left.x,left.u,left.ut)
+            FVal[j,:] = F(t,left.x,left.u,left.ut)::Array{Float64,1}
         elseif s == zero(T)
-            FVal[:,j] = F(t,right.x,right.u,right.ut)
+            FVal[j,:] = F(t,right.x,right.u,right.ut)::Array{Float64,1}
         else
             x = left.x; xt = left.xt
             xs  = x+s*h
-             computeux!(ux, Qs[j],H,left.u,right.u)
-            computeutx!(utx,Qs[j],H,Ht,xt,left.ut,right.ut,ux,left.u,right.u)
-            FVal[:,j] = F(t,xs,ux,utx)
+             computeux!(tmp.ux, Qs[j],H,left.u,right.u,tmp)
+            computeutx!(tmp.utx,Qs[j],H,Ht,xt,left.ut,right.ut,tmp.ux,left.u,right.u,tmp)
+            FVal[j,:] = F(t,xs,tmp.ux,tmp.utx)::Array{Float64,1}
         end
 
     end
@@ -188,37 +196,46 @@ function computeresu{T}(pde :: Equation,
                         t  :: T,
                         x  :: Vector{T}, xt :: Vector{T},
                         u  :: Array{T,3},ut :: Array{T,3})
-    nd,nu,nx = size(u)
+    nd = size(u,1)
+    nu = size(u,2)
+    nx = size(u,3)
     ns = nd
     ns2 = div(ns,2)
 
-    FGauss   = Array(T,nu,ns  )
-    GLobatto = Array(T,nu,ns+1)
-    resu     = Array(T,nu,ns,nx)
+    FGauss   = Array(T,ns  ,nu)
+    GLobatto = Array(T,ns+1,nu)
+    resu     = Array(T,ns  ,nu,nx)
+    tmp      = TemporaryArrays(nd,nu)
+    H        = Array(T,ns+1)
+    Ht       = Array(T,ns+1)
 
     for i = 1:nx-1
 
         left  = MeshPoint(x[i  ],xt[i  ],view(u,:,:,i  ),view(ut,:,:,i  ), nd, nu)
         right = MeshPoint(x[i+1],xt[i+1],view(u,:,:,i+1),view(ut,:,:,i+1), nd, nu)
         h = x[i+1]-x[i];      ht = xt[i+1]-xt[i]
-        H  = [h^j for j=0:nd]
-        Ht = [j*ht*h^(j-1) for j=0:nd]
 
-        getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,left,right,H,Ht)
-        getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,left,right,H,Ht)
+        for j = 0:nd
+            H[j+1]  = h^j
+            Ht[j+1] = j*ht*h^(j-1)
+        end
+
+        getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,left,right,H,Ht,tmp)
+        getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,left,right,H,Ht,tmp)
 
         # @todo change the definition of AB or FGauss to remove the
         # primes
-        resu[:,:,i] = FGauss'-coldata.AB*GLobatto'/h
+        resu[:,:,i] = FGauss-coldata.AB*GLobatto/h
+
     end
 
     # residua for the boundary conditions, Bl and Br should each
     # return the vector of size at least nu*ns/2, the remaining
     # boundary conditions are discarded
-    resBl = pde.Bl(t,x[1  ],xt[1  ],view(u,:,:,1 ),view(ut,:,:,1 ))
-    resBr = pde.Bl(t,x[end],xt[end],view(u,:,:,nx),view(ut,:,:,nx))
-    resu[:,    1:ns2,nx] = reshape(resBl[1:nu*ns2],nu,ns2)
-    resu[:,ns2+1:ns, nx] = reshape(resBr[1:nu*ns2],nu,ns2)
+    resBl = pde.Bl(t,x[1  ],xt[1  ],view(u,:,:,1 ),view(ut,:,:,1 ))::Array{Float64,1}
+    resBr = pde.Br(t,x[end],xt[end],view(u,:,:,nx),view(ut,:,:,nx))::Array{Float64,1}
+    resu[    1:ns2,:,nx] = reshape(resBl,nu,ns2)
+    resu[ns2+1:ns, :,nx] = reshape(resBr,nu,ns2)
 
     return resu
 
@@ -226,21 +243,22 @@ end
 
 
 # compute residua for the mesh
-function computeresx{T}(pde :: Equation,
-                        coldata :: CollocationData,
-                        t :: T,
-                        x :: Vector{T}, xt :: Vector{T},
-                        u :: Array{T,3},ut :: Array{T,3})
+function computeresx(pde :: Equation,
+                     coldata :: CollocationData,
+                     t :: Float64,
+                     x :: Vector{Float64}, xt :: Vector{Float64},
+                     u :: Array{Float64,3},ut :: Array{Float64,3})
 
     nd,nu,nx = size(u)
     ns = nd                     # number of collocation points
     ns2 = div(ns,2)
 
-    uhalf    = Array(T,ns+1,nu)
-    uthalf   = Array(T,ns+1,nu)
-    resx     = Array(T,nx)
-    Mhalf    = Array(T,nx-1)
-    Yhalf    = Array(T,nx+1)
+    uhalf    = Array(Float64,ns+1,nu)
+    uthalf   = Array(Float64,ns+1,nu)
+    resx     = Array(Float64,nx)
+    Mhalf    = Array(Float64,nx-1)
+    Yhalf    = Array(Float64,nx+1)
+    tmp      = TemporaryArrays(nd,nu)
 
     Qshalf = coldata.lobatto[ns2+1]
 
@@ -252,22 +270,22 @@ function computeresx{T}(pde :: Equation,
         Ht = [j*ht*h^(j-1) for j=0:nd]
 
         if i==1 || i==nx-1
-            Mhalf[i] = (pde.M(t,xl,ul)+pde.M(t,xr,ur))/2
+            Mhalf[i] = ((pde.M(t,xl,ul)::Float64+pde.M(t,xr,ur)::Float64)/2)
         else
             xhalf  = (xl+xr)/2
             xthalf = (xtl+xtr)/2
-             computeux!(uhalf, Qshalf,H,ul,ur)
-            computeutx!(uthalf,Qshalf,H,Ht,xthalf,utl,utr,uhalf,ul,ur)
-            Mhalf[i] = pde.M(t,xhalf,uhalf)
+             computeux!(uhalf, Qshalf,H,ul,ur,tmp)
+            computeutx!(uthalf,Qshalf,H,Ht,xthalf,utl,utr,uhalf,ul,ur,tmp)
+            Mhalf[i] = pde.M(t,xhalf,uhalf)::Float64
         end
 
         Yhalf[i+1] = -pde.tau*(xtr-xtl)/(xr-xl)^2+1/(xr-xl)
 
         if i == 1
-            resx[ 1] = pde.Bxl(t,xl,xtl,ul,utl)
+            resx[ 1] = pde.Bxl(t,xl,xtl,ul,utl)::Float64
         end
         if i == nx-1
-            resx[nx] = pde.Bxr(t,xr,xtr,ur,utr)
+            resx[nx] = pde.Bxr(t,xr,xtr,ur,utr)::Float64
         end
     end
 
@@ -344,7 +362,7 @@ function movcol_solve(pde :: Equation,
 
     # wrapper function for DASSL
     function dae(t,y,yt)
-        res = Array(eltype(x0),nd*nu*nx+nx)
+        res = Array(Float64,nd*nu*nx+nx)
         # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
          x =  y[1:nx];  u = reshape( y[nx+1:end],nd,nu,nx)
         xt = yt[1:nx]; ut = reshape(yt[nx+1:end],nd,nu,nx)
