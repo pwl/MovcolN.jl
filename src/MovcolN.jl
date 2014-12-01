@@ -223,9 +223,13 @@ function computeresu{T}(pde :: Equation,
         getcollocationvalues!(FGauss,  coldata.gauss,  pde.F,t,left,right,H,Ht,tmp)
         getcollocationvalues!(GLobatto,coldata.lobatto,pde.G,t,left,right,H,Ht,tmp)
 
-        # @todo change the definition of AB or FGauss to remove the
-        # primes
-        resu[:,:,i] = FGauss-coldata.AB*GLobatto/h
+        # equivalent to
+        #
+        # resu[:,:,i] = FGauss-coldata.AB*GLobatto/h
+        #
+        # for small AB the fillresu! is significantly faster than the
+        # build-in matrix multiplication
+        fillresu!(resu,FGauss,GLobatto,coldata.AB,h,i)
 
     end
 
@@ -239,6 +243,24 @@ function computeresu{T}(pde :: Equation,
 
     return resu
 
+end
+
+function fillresu!(resu,F,G,AB,h,i)
+    nG = size(G,1)
+    nd = size(resu,1)
+    nu = size(resu,2)
+    for l = 1:nu
+        for k = 1:nd
+            resu[k,l,i] = F[k,l]
+        end
+    end
+    for j = 1:nG
+        for l = 1:nu
+            for k = 1:nd
+                resu[k,l,i] -= AB[k,j]*G[j,l]/h
+            end
+        end
+    end
 end
 
 
