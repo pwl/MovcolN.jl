@@ -4,6 +4,7 @@ using Polynomials
 using Devectorize
 using DASSL
 using ArrayViews
+using Iterators
 
 include("polynomials.jl")       # polynomial related functions
 
@@ -195,7 +196,8 @@ function computeresu{T}(pde :: Equation,
                         coldata :: CollocationData,
                         t  :: T,
                         x  :: Vector{T}, xt :: Vector{T},
-                        u  :: Array{T,3},ut :: Array{T,3})
+                        u  :: Array{T,3},ut :: Array{T,3};
+                        args...)
     nd = size(u,1)
     nu = size(u,2)
     nx = size(u,3)
@@ -269,7 +271,8 @@ function computeresx(pde :: Equation,
                      coldata :: CollocationData,
                      t :: Float64,
                      x :: Vector{Float64}, xt :: Vector{Float64},
-                     u :: Array{Float64,3},ut :: Array{Float64,3})
+                     u :: Array{Float64,3},ut :: Array{Float64,3};
+                     args...)
 
     nd,nu,nx = size(u)
     ns = nd                     # number of collocation points
@@ -315,6 +318,8 @@ function computeresx(pde :: Equation,
     Yhalf[ 1 ] = Yhalf[  2  ]
     Yhalf[end] = Yhalf[end-1]
 
+    Mhalf = smoothen(Mhalf;args...)
+
     # @todo add monitor smoothing
 
     # compute the residua for mesh movement
@@ -328,12 +333,28 @@ function computeresx(pde :: Equation,
 end
 
 
+# simple gaussian filter to smoothen the monitor function
+function smoothen(M; passes = 4, args...)
+    if passes == 0
+        return M
+    else
+        Msmooth = zero(M)
+        @simd for i = 2:length(M)-1
+            @inbounds Msmooth[i]=(M[i-1]+2M[i]+M[i+1])/4
+        end
+        Msmooth[1]=(M[1]+M[2])/2
+        Msmooth[end]=(M[end-1]+M[end])/2
+        return smoothen(Msmooth, passes=passes-1)
+    end
+end
+
+
 # creates a relaxed mesh
 function meshinit(pde :: Equation,
                   coldata :: CollocationData,
                   nx :: Int;
                   mesherr = 1e-5,
-                  maxsteps = 1000,
+                  mesh_maxsteps = Inf,
                   args...)
 
     ns = coldata.ns
@@ -348,7 +369,7 @@ function meshinit(pde :: Equation,
     # wrapper function for DASSL
     function dae(t,x,xt)
         u    = reshape(vcat(map(xpde.u0, x)...),ns,1,nx)
-        resx = computeresx(xpde,coldata,xpde.t0,x,xt,u,u)
+        resx = computeresx(xpde,coldata,xpde.t0,x,xt,u,u;args...)
         return resx
     end
 
@@ -360,7 +381,7 @@ function meshinit(pde :: Equation,
             info("Mesh converged after $nstp steps")
             x0  = x
             break
-        elseif nstp > maxsteps
+        elseif nstp > mesh_maxsteps
             error("Unable to converge in $maxsteps steps")
             break
         end
@@ -388,20 +409,23 @@ function movcol_solve(pde :: Equation,
         # @todo xt = g(t)*xt, ut = g(t)*ut and make tau=tau(t)
          x =  y[1:nx];  u = reshape( y[nx+1:end],nd,nu,nx)
         xt = yt[1:nx]; ut = reshape(yt[nx+1:end],nd,nu,nx)
-        resu = computeresu(pde,coldata,t,x,xt,u,ut)
-        resx = computeresx(pde,coldata,t,x,xt,u,ut)
+        resu = computeresu(pde,coldata,t,x,xt,u,ut;args...)
+        resx = computeresx(pde,coldata,t,x,xt,u,ut;args...)
         res[1:nx] = resx
         res[nx+1:end] = resu
         return res
     end
 
-    y0 = vcat(x0,vec(u0))
-
-    for (t,y,yt) in dasslIterator(dae,y0,pde.t0;args...)
-        if t > 1
-            return (t,y,yt)
-        end
+    function get_results(t,y,yt)
+         x =  y[1:nx];  u = reshape( y[nx+1:end],nd,nu,nx)
+        xt = yt[1:nx]; ut = reshape(yt[nx+1:end],nd,nu,nx)
+        return t, x, u, xt, ut
     end
+
+    y0  = vcat(x0,vec(u0))
+    sol = dasslIterator(dae,y0,pde.t0;args...)
+
+    return imap(z->get_results(z...),sol)
 
 end
 
