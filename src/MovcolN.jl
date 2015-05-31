@@ -167,15 +167,16 @@ function getcollocationvalues!{T}(FVal,Qs::Vector{CollocationPoint},F,t::T,left,
         s = Qs[j].s
 
         if s == zero(T)
-            FVal[j,:] = F(t,left.x,left.u,left.ut)::Array{Float64,1}
+            F(view(FVal,j,:),t,left.x,left.u,left.ut)
         elseif s == zero(T)
-            FVal[j,:] = F(t,right.x,right.u,right.ut)::Array{Float64,1}
+            F(view(FVal,j,:),t,right.x,right.u,right.ut)
         else
             x = left.x; xt = left.xt
             xs  = x+s*h
              computeux!(tmp.ux, Qs[j],H,left.u,right.u,tmp)
             computeutx!(tmp.utx,Qs[j],H,Ht,xt,left.ut,right.ut,tmp.ux,left.u,right.u,tmp)
-            FVal[j,:] = F(t,xs,tmp.ux,tmp.utx)::Array{Float64,1}
+            F(view(FVal,j,:),t,xs,tmp.ux,tmp.utx)
+
         end
 
     end
@@ -320,12 +321,13 @@ function computeresx(pde :: Equation,
 
     Mhalf = smoothen(Mhalf;args...)
 
-    # @todo add monitor smoothing
-
     # compute the residua for mesh movement
     for i = 2:nx-1
         g=pde.gamma*(pde.gamma+1)
-        resx[i] = (Yhalf[i+1]-g*(Yhalf[i+2]-2*Yhalf[i+1]+Yhalf[i]))/Mhalf[i]-(Yhalf[i]-g*(Yhalf[i+1]-2*Yhalf[i]+Yhalf[i-1]))/Mhalf[i-1]
+        # mmpde6?
+        # resx[i] = (Yhalf[i+1]-g*(Yhalf[i+2]-2*Yhalf[i+1]+Yhalf[i]))/Mhalf[i]-(Yhalf[i]-g*(Yhalf[i+1]-2*Yhalf[i]+Yhalf[i-1]))/Mhalf[i-1]
+        # mmpde4?
+        resx[i] = pde.tau*(xt[i+1]-2*xt[i]+xt[i-1])+Mhalf[i]*(x[i+1]-x[i])-Mhalf[i-1]*(x[i]-x[i-1])
     end
 
     return resx
@@ -368,7 +370,7 @@ function meshinit(pde :: Equation,
 
     # wrapper function for DASSL
     function dae(t,x,xt)
-        u    = reshape(vcat(map(xpde.u0, x)...),ns,1,nx)
+        u    = reshape(vcat(map(xpde.u0, x)...),ns*xpde.nu,1,nx)
         resx = computeresx(xpde,coldata,xpde.t0,x,xt,u,u;args...)
         return resx
     end
